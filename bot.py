@@ -3,7 +3,13 @@ from typing import Dict, Any, List
 
 import requests
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -19,6 +25,8 @@ API_BASE = os.getenv("API_BASE", "").rstrip("/")
 BOT_API_TOKEN = os.getenv("BOT_API_TOKEN", "")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")
+
+STEPS = ["title", "body", "desc", "image", "category", "tags"]
 
 
 def api_headers() -> Dict[str, str]:
@@ -50,49 +58,130 @@ def build_tag_keyboard(tags: List[Dict[str, Any]], selected: List[str]):
     return InlineKeyboardMarkup(buttons)
 
 
+def main_reply_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("🆕 Yangi maqola"), KeyboardButton("📍 Holat")],
+            [KeyboardButton("⬅️ Orqaga"), KeyboardButton("⏭️ Skip rasm"), KeyboardButton("❌ Bekor")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def step_name(step: str) -> str:
+    names = {
+        "title": "1/6 Sarlavha",
+        "body": "2/6 Matn",
+        "desc": "3/6 Description",
+        "image": "4/6 Rasm",
+        "category": "5/6 Kategoriya",
+        "tags": "6/6 Teglar",
+    }
+    return names.get(step, step)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     context.user_data["step"] = "title"
-    await update.message.reply_text("Sarlavhani yuboring.")
+    await update.message.reply_text("📝 Yangi maqola. Sarlavhani yuboring.", reply_markup=main_reply_keyboard())
+
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    step = context.user_data.get("step", "title")
+    await update.message.reply_text(f"Joriy bosqich: {step_name(step)}", reply_markup=main_reply_keyboard())
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text("Bekor qilindi. /new bilan qayta boshlang.")
+    await update.message.reply_text("Bekor qilindi. /new bilan qayta boshlang.", reply_markup=main_reply_keyboard())
+
+
+async def back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    step = context.user_data.get("step", "title")
+    idx = max(STEPS.index(step) - 1, 0)
+    context.user_data["step"] = STEPS[idx]
+    await update.message.reply_text(
+        f"Orqaga qaytildi. Hozirgi bosqich: {step_name(context.user_data['step'])}",
+        reply_markup=main_reply_keyboard(),
+    )
+
+
+async def skip_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    step = context.user_data.get("step")
+    if step != "image":
+        await update.message.reply_text("Bu bosqichda skip ishlamaydi.", reply_markup=main_reply_keyboard())
+        return
+    context.user_data["photo_file_id"] = None
+    context.user_data["step"] = "category"
+    try:
+        meta = fetch_meta()
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Kategoriya yuklanmadi: {exc}", reply_markup=main_reply_keyboard())
+        return
+    await update.message.reply_text(
+        "Rasm o‘tkazildi. Kategoriya tanlang:",
+        reply_markup=build_category_keyboard(meta["categories"]),
+    )
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    step = context.user_data.get("step", "title")
     text = (update.message.text or "").strip()
+
+    if text == "🆕 Yangi maqola":
+        await start(update, context)
+        return
+    if text == "📍 Holat":
+        await status(update, context)
+        return
+    if text == "⬅️ Orqaga":
+        await back(update, context)
+        return
+    if text == "⏭️ Skip rasm":
+        await skip_image(update, context)
+        return
+    if text == "❌ Bekor":
+        await cancel(update, context)
+        return
+
+    step = context.user_data.get("step", "title")
 
     if step == "title":
         context.user_data["title"] = text
         context.user_data["step"] = "body"
-        await update.message.reply_text("Maqola matnini yuboring.")
+        await update.message.reply_text("✅ Sarlavha qabul qilindi. Endi matn yuboring.")
         return
 
     if step == "body":
         context.user_data["body"] = text
         context.user_data["step"] = "desc"
-        await update.message.reply_text("Qisqa description yuboring.")
+        await update.message.reply_text("✅ Matn qabul qilindi. Qisqa description yuboring.")
         return
 
     if step == "desc":
         context.user_data["description"] = text
-        context.user_data["step"] = "category"
-        meta = fetch_meta()
-        await update.message.reply_text(
-            "Kategoriya tanlang:",
-            reply_markup=build_category_keyboard(meta["categories"]),
-        )
+        context.user_data["step"] = "image"
+        await update.message.reply_text("✅ Description qabul qilindi. Endi rasm yuboring (yoki 'Skip rasm').")
         return
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.photo:
         return
+    step = context.user_data.get("step")
+    if step != "image":
+        await update.message.reply_text("Rasm bosqichida emassiz. 'Holat' ni bosing.")
+        return
     context.user_data["photo_file_id"] = update.message.photo[-1].file_id
-    await update.message.reply_text("Rasm qabul qilindi ✅")
+    context.user_data["step"] = "category"
+    try:
+        meta = fetch_meta()
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Kategoriya yuklanmadi: {exc}")
+        return
+    await update.message.reply_text(
+        "✅ Rasm qabul qilindi. Kategoriya tanlang:",
+        reply_markup=build_category_keyboard(meta["categories"]),
+    )
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -103,7 +192,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("cat:"):
         context.user_data["category_slug"] = data.split(":", 1)[1]
         context.user_data["step"] = "tags"
-        meta = fetch_meta()
+        try:
+            meta = fetch_meta()
+        except Exception as exc:
+            await query.edit_message_text(f"❌ Teglar yuklanmadi: {exc}")
+            return
         context.user_data["all_tags"] = meta["tags"]
         context.user_data["selected_tags"] = []
         await query.edit_message_text(
@@ -117,7 +210,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         selected = context.user_data.get("selected_tags", [])
         all_tags = context.user_data.get("all_tags", [])
         if value == "done":
-            await query.edit_message_text("Post yuborilmoqda...")
+            await query.edit_message_text("⏳ Post yuborilmoqda...")
             await create_post(update, context)
             return
 
@@ -134,14 +227,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def create_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = context.user_data
+    files = {}
     file_id = data.get("photo_file_id")
-    if not file_id:
-        await update.effective_chat.send_message("Rasm yuborilmagan. Qaytadan /new.")
-        return
-
-    file = await context.bot.get_file(file_id)
-    image_bytes = await file.download_as_bytearray()
-    files = {"image": ("post.jpg", image_bytes)}
+    if file_id:
+        file = await context.bot.get_file(file_id)
+        image_bytes = await file.download_as_bytearray()
+        files = {"image": ("post.jpg", image_bytes)}
     payload = {
         "title": data.get("title", ""),
         "body": data.get("body", ""),
@@ -149,16 +240,20 @@ async def create_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "category_slug": data.get("category_slug", ""),
         "tag_slugs": ",".join(data.get("selected_tags", [])),
     }
-    resp = requests.post(
-        f"{API_BASE}/api/bot/post/",
-        headers=api_headers(),
-        data=payload,
-        files=files,
-        timeout=60,
-    )
+    try:
+        resp = requests.post(
+            f"{API_BASE}/api/bot/post/",
+            headers=api_headers(),
+            data=payload,
+            files=files,
+            timeout=60,
+        )
+    except Exception as exc:
+        await update.effective_chat.send_message(f"❌ APIga ulanishda xato: {exc}")
+        return
     result = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
     if not resp.ok or not result.get("ok"):
-        await update.effective_chat.send_message(f"Xatolik: {resp.text}")
+        await update.effective_chat.send_message(f"❌ API xato: {resp.text}")
         return
 
     post_url = result.get("url", "")
@@ -167,10 +262,23 @@ async def create_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = f"🆕 {title}\n\n{description}\n\n{post_url}"
 
     if CHANNEL_ID:
-        await context.bot.send_photo(chat_id=CHANNEL_ID, photo=file_id, caption=caption)
+        if file_id:
+            await context.bot.send_photo(chat_id=CHANNEL_ID, photo=file_id, caption=caption)
+        else:
+            await context.bot.send_message(chat_id=CHANNEL_ID, text=caption)
 
     context.user_data.clear()
-    await update.effective_chat.send_message("Maqola saytga joylandi va kanalga yuborildi ✅")
+    await update.effective_chat.send_message("✅ Maqola saytga joylandi va kanalga yuborildi.", reply_markup=main_reply_keyboard())
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    err = context.error
+    msg = f"❌ Bot xatosi: {type(err).__name__}: {err}"
+    try:
+        if update and hasattr(update, "effective_chat") and update.effective_chat:
+            await update.effective_chat.send_message(msg)
+    except Exception:
+        pass
 
 
 def main():
@@ -183,10 +291,14 @@ def main():
 
     app = ApplicationBuilder().token(TG_TOKEN).build()
     app.add_handler(CommandHandler("new", start))
+    app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CommandHandler("back", back))
+    app.add_handler(CommandHandler("skip", skip_image))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_error_handler(error_handler)
     app.run_polling()
 
 
