@@ -258,8 +258,11 @@ async def create_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     post_url = result.get("url", "")
     title = data.get("title", "")
-    description = data.get("description", "")[:200]
-    caption = f"🆕 {title}\n\n{description}\n\n{post_url}"
+    description = (data.get("description", "") or "").strip()
+    body_text = (data.get("body", "") or "").strip()
+    preview_source = description if description else body_text
+    preview = preview_source[:400]
+    caption = f"🆕 {title}\n\n{preview}\n\n{post_url}"
 
     if CHANNEL_ID:
         if file_id:
