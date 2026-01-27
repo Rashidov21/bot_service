@@ -253,7 +253,10 @@ async def create_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     result = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
     if not resp.ok or not result.get("ok"):
-        await update.effective_chat.send_message(f"❌ API xato: {resp.text}")
+        err_text = resp.text
+        if len(err_text) > 1000:
+            err_text = err_text[:1000] + "..."
+        await update.effective_chat.send_message(f"❌ API xato: {err_text}")
         return
 
     post_url = result.get("url", "")
@@ -277,6 +280,8 @@ async def create_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     err = context.error
     msg = f"❌ Bot xatosi: {type(err).__name__}: {err}"
+    if len(msg) > 1000:
+        msg = msg[:1000] + "..."
     try:
         if update and hasattr(update, "effective_chat") and update.effective_chat:
             await update.effective_chat.send_message(msg)
