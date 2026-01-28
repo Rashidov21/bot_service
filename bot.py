@@ -242,10 +242,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data or ""
 
-    if data.startswith("post:"):
-        slug = data.split(":", 1)[1]
+    if data.startswith("postid:"):
+        post_id = data.split(":", 1)[1]
         post_lookup = context.user_data.get("recent_posts", {})
-        post = post_lookup.get(slug)
+        post = post_lookup.get(post_id)
         if not post:
             await query.edit_message_text("Post topilmadi. Qayta urinib ko'ring.")
             return
@@ -359,8 +359,8 @@ async def show_recent_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not posts:
         await update.message.reply_text("Postlar topilmadi.", reply_markup=main_reply_keyboard())
         return
-    context.user_data["recent_posts"] = {p["slug"]: p for p in posts}
-    buttons = [[InlineKeyboardButton(p["title"], callback_data=f"post:{p['slug']}")] for p in posts]
+    context.user_data["recent_posts"] = {str(p["id"]): p for p in posts}
+    buttons = [[InlineKeyboardButton(p["title"], callback_data=f"postid:{p['id']}")] for p in posts]
     await update.message.reply_text("Kanalga yuborish uchun postni tanlang:", reply_markup=InlineKeyboardMarkup(buttons))
 
 
