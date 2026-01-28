@@ -321,14 +321,22 @@ async def create_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
             timeout=60,
         )
     except Exception as exc:
-        await update.effective_chat.send_message(f"❌ APIga ulanishda xato: {exc}")
+        # Xatolikni faqat admin ga yuborish
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"❌ APIga ulanishda xato: {exc}")
+        # Foydalanuvchiga umumiy xabar
+        await update.effective_chat.send_message("❌ Maqola yuborishda xatolik yuz berdi. Admin bilan bog'lanish.")
         return
     result = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
     if not resp.ok or not result.get("ok"):
         err_text = resp.text
         if len(err_text) > 1000:
             err_text = err_text[:1000] + "..."
-        await update.effective_chat.send_message(f"❌ API xato: {err_text}")
+        # Xatolikni faqat admin ga yuborish
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"❌ API xato: {err_text}")
+        # Foydalanuvchiga umumiy xabar
+        await update.effective_chat.send_message("❌ Maqola yuborishda xatolik yuz berdi. Admin bilan bog'lanish.")
         return
 
     post_url = result.get("url", "")
@@ -366,7 +374,10 @@ async def show_recent_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def send_post_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE, post: Dict[str, Any]):
     if not CHANNEL_ID:
-        await update.effective_chat.send_message("❌ TELEGRAM_CHANNEL_ID sozlanmagan.")
+        # Xatolikni faqat admin ga yuborish
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="❌ TELEGRAM_CHANNEL_ID sozlanmagan.")
+        await update.effective_chat.send_message("❌ Kanal sozlanmagan. Admin bilan bog'lanish.")
         return
     title = post.get("title", "")
     url = post.get("url", "")
@@ -374,8 +385,15 @@ async def send_post_to_channel(update: Update, context: ContextTypes.DEFAULT_TYP
     preview = excerpt[:400] if excerpt else ""
     caption = f"🆕 {title}\n\n{preview}\n\n{url}"
     await update.effective_chat.send_message("⏳ Kanalga yuborilmoqda...")
-    await context.bot.send_message(chat_id=CHANNEL_ID, text=caption)
-    await update.effective_chat.send_message("✅ Kanalga yuborildi.", reply_markup=main_reply_keyboard())
+    try:
+        # Faqat maqolani kanalga yuborish
+        await context.bot.send_message(chat_id=CHANNEL_ID, text=caption)
+        await update.effective_chat.send_message("✅ Kanalga yuborildi.", reply_markup=main_reply_keyboard())
+    except Exception as exc:
+        # Xatolikni faqat admin ga yuborish
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"❌ Kanalga yuborishda xato: {exc}")
+        await update.effective_chat.send_message("❌ Kanalga yuborishda xatolik yuz berdi. Admin bilan bog'lanish.")
 
 
 async def send_daily_pick_to_admin(context: ContextTypes.DEFAULT_TYPE):
@@ -411,18 +429,49 @@ async def send_daily_pick_to_admin(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_daily_decision(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str, pick_id: int):
     if action not in ("sent", "rejected"):
-        await update.effective_chat.send_message("❌ Noto‘g‘ri qaror.")
+        await update.effective_chat.send_message("❌ Noto'g'ri qaror.")
         return
+    
+    # "sent" bo'lsa, avval post ma'lumotlarini olish (mark_daily_pick chaqirilishidan oldin)
+    post = None
+    if action == "sent":
+        try:
+            # Post ma'lumotlarini API dan olish (mark_daily_pick chaqirilishidan oldin)
+            post_payload = fetch_daily_pick()
+            if post_payload.get("ok") and post_payload.get("pick_id") == pick_id:
+                post = post_payload.get("post", {})
+        except Exception as exc:
+            # Xatolikni faqat admin ga yuborish
+            if ADMIN_CHAT_ID:
+                await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"❌ Post ma'lumotlarini olishda xato: {exc}")
+    
+    # Endi mark_daily_pick ni chaqirish
     try:
         mark_daily_pick(pick_id, action)
     except Exception as exc:
-        await update.effective_chat.send_message(f"❌ Mark xato: {exc}")
+        # Xatolikni faqat admin ga yuborish
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"❌ Mark xato: {exc}")
+        await update.effective_chat.send_message("❌ Xatolik yuz berdi. Admin bilan bog'lanish.")
         return
+    
     if action == "sent":
+        if not post:
+            # Agar post ma'lumotlari olinmagan bo'lsa, xatolik yuborish
+            if ADMIN_CHAT_ID:
+                await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"❌ Post ma'lumotlari olinmadi (pick_id: {pick_id})")
+            await update.effective_chat.send_message("❌ Kanalga yuborishda xatolik yuz berdi. Admin bilan bog'lanish.")
+            return
+        
         await update.effective_chat.send_message("⏳ Kanalga yuborilmoqda...")
-        post_payload = fetch_daily_pick()
-        post = post_payload.get("post", {})
-        await send_post_to_channel(update, context, post)
+        try:
+            # Faqat maqolani kanalga yuborish
+            await send_post_to_channel(update, context, post)
+        except Exception as exc:
+            # Xatolikni faqat admin ga yuborish
+            if ADMIN_CHAT_ID:
+                await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"❌ Daily pick kanalga yuborishda xato: {exc}")
+            await update.effective_chat.send_message("❌ Kanalga yuborishda xatolik yuz berdi. Admin bilan bog'lanish.")
     else:
         await update.effective_chat.send_message("❌ Post rad etildi.", reply_markup=main_reply_keyboard())
 
@@ -433,8 +482,18 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     if len(msg) > 1000:
         msg = msg[:1000] + "..."
     try:
+        # Xatolikni faqat admin ga yuborish
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg)
+        # Foydalanuvchiga umumiy xabar (agar update mavjud bo'lsa va kanal emas bo'lsa)
         if update and hasattr(update, "effective_chat") and update.effective_chat:
-            await update.effective_chat.send_message(msg)
+            chat_id = update.effective_chat.id
+            # Kanal ID negativ bo'ladi, shuning uchun tekshiramiz
+            if CHANNEL_ID and str(chat_id) != str(CHANNEL_ID):
+                try:
+                    await update.effective_chat.send_message("❌ Bot xatosi yuz berdi. Admin bilan bog'lanish.")
+                except Exception:
+                    pass
     except Exception:
         pass
 
