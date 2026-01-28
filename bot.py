@@ -1,4 +1,6 @@
 import os
+import datetime
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, List
 
 import requests
@@ -25,6 +27,9 @@ API_BASE = os.getenv("API_BASE", "").rstrip("/")
 BOT_API_TOKEN = os.getenv("BOT_API_TOKEN", "")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
+DAILY_TIME = os.getenv("DAILY_TIME", "09:00")
+DAILY_TZ = os.getenv("DAILY_TZ", "Asia/Tashkent")
 
 STEPS = ["title", "body", "desc", "image", "category", "tags"]
 
@@ -35,6 +40,38 @@ def api_headers() -> Dict[str, str]:
 
 def fetch_meta() -> Dict[str, Any]:
     resp = requests.get(f"{API_BASE}/api/bot/meta/", headers=api_headers(), timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def fetch_recent_posts(limit: int = 10) -> Dict[str, Any]:
+    resp = requests.get(
+        f"{API_BASE}/api/bot/posts/",
+        headers=api_headers(),
+        params={"limit": limit},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def fetch_daily_pick() -> Dict[str, Any]:
+    resp = requests.get(
+        f"{API_BASE}/api/bot/daily/next/",
+        headers=api_headers(),
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def mark_daily_pick(pick_id: int, action: str) -> Dict[str, Any]:
+    resp = requests.post(
+        f"{API_BASE}/api/bot/daily/mark/",
+        headers=api_headers(),
+        data={"pick_id": pick_id, "action": action},
+        timeout=30,
+    )
     resp.raise_for_status()
     return resp.json()
 
@@ -61,7 +98,8 @@ def build_tag_keyboard(tags: List[Dict[str, Any]], selected: List[str]):
 def main_reply_keyboard():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("🆕 Yangi maqola"), KeyboardButton("📍 Holat")],
+            [KeyboardButton("🆕 Yangi maqola"), KeyboardButton("✅ Matn tugadi")],
+            [KeyboardButton("📰 Oxirgi postlar"), KeyboardButton("📍 Holat")],
             [KeyboardButton("⬅️ Orqaga"), KeyboardButton("⏭️ Skip rasm"), KeyboardButton("❌ Bekor")],
         ],
         resize_keyboard=True,
@@ -130,6 +168,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "🆕 Yangi maqola":
         await start(update, context)
         return
+    if text == "📰 Oxirgi postlar":
+        await show_recent_posts(update, context)
+        return
     if text == "📍 Holat":
         await status(update, context)
         return
@@ -142,6 +183,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "❌ Bekor":
         await cancel(update, context)
         return
+    if text == "✅ Matn tugadi":
+        if not context.user_data.get("body"):
+            await update.message.reply_text("Matn hali kiritilmagan.", reply_markup=main_reply_keyboard())
+            return
+        context.user_data["step"] = "desc"
+        await update.message.reply_text("✅ Matn tugadi. Qisqa description yuboring.")
+        return
 
     step = context.user_data.get("step", "title")
 
@@ -152,9 +200,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if step == "body":
-        context.user_data["body"] = text
-        context.user_data["step"] = "desc"
-        await update.message.reply_text("✅ Matn qabul qilindi. Qisqa description yuboring.")
+        current = context.user_data.get("body", "")
+        if current:
+            current += "\n\n" + text
+        else:
+            current = text
+        context.user_data["body"] = current
+        await update.message.reply_text("✅ Qabul qilindi. Davom ettiring yoki 'Matn tugadi' bosing.")
         return
 
     if step == "desc":
@@ -188,6 +240,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data or ""
+
+    if data.startswith("post:"):
+        slug = data.split(":", 1)[1]
+        post_lookup = context.user_data.get("recent_posts", {})
+        post = post_lookup.get(slug)
+        if not post:
+            await query.edit_message_text("Post topilmadi. Qayta urinib ko'ring.")
+            return
+        await send_post_to_channel(update, post)
+        return
+
+    if data.startswith("daily:"):
+        action, pick_id = data.split(":", 2)[1:]
+        await handle_daily_decision(update, action, int(pick_id))
+        return
 
     if data.startswith("cat:"):
         context.user_data["category_slug"] = data.split(":", 1)[1]
@@ -277,6 +344,84 @@ async def create_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_chat.send_message("✅ Maqola saytga joylandi va kanalga yuborildi.", reply_markup=main_reply_keyboard())
 
 
+async def show_recent_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        payload = fetch_recent_posts(limit=10)
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Postlar yuklanmadi: {exc}", reply_markup=main_reply_keyboard())
+        return
+    posts = payload.get("posts", [])
+    if not posts:
+        await update.message.reply_text("Postlar topilmadi.", reply_markup=main_reply_keyboard())
+        return
+    context.user_data["recent_posts"] = {p["slug"]: p for p in posts}
+    buttons = [[InlineKeyboardButton(p["title"], callback_data=f"post:{p['slug']}")] for p in posts]
+    await update.message.reply_text("Kanalga yuborish uchun postni tanlang:", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def send_post_to_channel(update: Update, post: Dict[str, Any]):
+    if not CHANNEL_ID:
+        await update.effective_chat.send_message("❌ TELEGRAM_CHANNEL_ID sozlanmagan.")
+        return
+    title = post.get("title", "")
+    url = post.get("url", "")
+    excerpt = (post.get("excerpt", "") or "").strip()
+    preview = excerpt[:400] if excerpt else ""
+    caption = f"🆕 {title}\n\n{preview}\n\n{url}"
+    await update.effective_chat.send_message("⏳ Kanalga yuborilmoqda...")
+    await update.effective_chat.bot.send_message(chat_id=CHANNEL_ID, text=caption)
+    await update.effective_chat.send_message("✅ Kanalga yuborildi.", reply_markup=main_reply_keyboard())
+
+
+async def send_daily_pick_to_admin(context: ContextTypes.DEFAULT_TYPE):
+    if not ADMIN_CHAT_ID:
+        return
+    try:
+        payload = fetch_daily_pick()
+    except Exception as exc:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"❌ Daily pick xato: {exc}")
+        return
+    if not payload.get("ok"):
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"❌ Daily pick xato: {payload}")
+        return
+    pick_id = payload.get("pick_id")
+    post = payload.get("post", {})
+    title = post.get("title", "")
+    url = post.get("url", "")
+    excerpt = (post.get("excerpt", "") or "").strip()
+    preview = excerpt[:400]
+    caption = f"🆕 {title}\n\n{preview}\n\n{url}"
+    buttons = [
+        [
+            InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"daily:sent:{pick_id}"),
+            InlineKeyboardButton("❌ Rad etish", callback_data=f"daily:rejected:{pick_id}"),
+        ]
+    ]
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=caption,
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def handle_daily_decision(update: Update, action: str, pick_id: int):
+    if action not in ("sent", "rejected"):
+        await update.effective_chat.send_message("❌ Noto‘g‘ri qaror.")
+        return
+    try:
+        mark_daily_pick(pick_id, action)
+    except Exception as exc:
+        await update.effective_chat.send_message(f"❌ Mark xato: {exc}")
+        return
+    if action == "sent":
+        await update.effective_chat.send_message("⏳ Kanalga yuborilmoqda...")
+        post_payload = fetch_daily_pick()
+        post = post_payload.get("post", {})
+        await send_post_to_channel(update, post)
+    else:
+        await update.effective_chat.send_message("❌ Post rad etildi.", reply_markup=main_reply_keyboard())
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     err = context.error
     msg = f"❌ Bot xatosi: {type(err).__name__}: {err}"
@@ -307,6 +452,13 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_error_handler(error_handler)
+    try:
+        hour, minute = DAILY_TIME.split(":")
+        daily_time = datetime.time(int(hour), int(minute))
+        tz = ZoneInfo(DAILY_TZ)
+        app.job_queue.run_daily(send_daily_pick_to_admin, time=daily_time, timezone=tz)
+    except Exception:
+        pass
     app.run_polling()
 
 
