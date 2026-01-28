@@ -5,6 +5,7 @@ from typing import Dict, Any, List
 
 import requests
 from dotenv import load_dotenv
+import markdown as md
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -300,9 +301,13 @@ async def create_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(file_id)
         image_bytes = await file.download_as_bytearray()
         files = {"image": ("post.jpg", image_bytes)}
+    body_text = (data.get("body", "") or "").strip()
+    body_html = md.markdown(body_text, extensions=["fenced_code", "tables"])
     payload = {
         "title": data.get("title", ""),
-        "body": data.get("body", ""),
+        "body": body_text,
+        "body_text": body_text,
+        "body_html": body_html,
         "description": data.get("description", ""),
         "category_slug": data.get("category_slug", ""),
         "tag_slugs": ",".join(data.get("selected_tags", [])),
