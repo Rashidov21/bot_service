@@ -249,12 +249,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not post:
             await query.edit_message_text("Post topilmadi. Qayta urinib ko'ring.")
             return
-        await send_post_to_channel(update, post)
+        await send_post_to_channel(update, context, post)
         return
 
     if data.startswith("daily:"):
         action, pick_id = data.split(":", 2)[1:]
-        await handle_daily_decision(update, action, int(pick_id))
+        await handle_daily_decision(update, context, action, int(pick_id))
         return
 
     if data.startswith("cat:"):
@@ -364,7 +364,7 @@ async def show_recent_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Kanalga yuborish uchun postni tanlang:", reply_markup=InlineKeyboardMarkup(buttons))
 
 
-async def send_post_to_channel(update: Update, post: Dict[str, Any]):
+async def send_post_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE, post: Dict[str, Any]):
     if not CHANNEL_ID:
         await update.effective_chat.send_message("❌ TELEGRAM_CHANNEL_ID sozlanmagan.")
         return
@@ -374,7 +374,7 @@ async def send_post_to_channel(update: Update, post: Dict[str, Any]):
     preview = excerpt[:400] if excerpt else ""
     caption = f"🆕 {title}\n\n{preview}\n\n{url}"
     await update.effective_chat.send_message("⏳ Kanalga yuborilmoqda...")
-    await update.effective_chat.bot.send_message(chat_id=CHANNEL_ID, text=caption)
+    await context.bot.send_message(chat_id=CHANNEL_ID, text=caption)
     await update.effective_chat.send_message("✅ Kanalga yuborildi.", reply_markup=main_reply_keyboard())
 
 
@@ -409,7 +409,7 @@ async def send_daily_pick_to_admin(context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def handle_daily_decision(update: Update, action: str, pick_id: int):
+async def handle_daily_decision(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str, pick_id: int):
     if action not in ("sent", "rejected"):
         await update.effective_chat.send_message("❌ Noto‘g‘ri qaror.")
         return
@@ -422,7 +422,7 @@ async def handle_daily_decision(update: Update, action: str, pick_id: int):
         await update.effective_chat.send_message("⏳ Kanalga yuborilmoqda...")
         post_payload = fetch_daily_pick()
         post = post_payload.get("post", {})
-        await send_post_to_channel(update, post)
+        await send_post_to_channel(update, context, post)
     else:
         await update.effective_chat.send_message("❌ Post rad etildi.", reply_markup=main_reply_keyboard())
 
