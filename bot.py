@@ -298,14 +298,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 timeout=180,
             )
             
-            data = resp.json()
-            if not resp.ok or not data.get("ok"):
-                raise Exception(data.get("error") or resp.text)
+            # Response status code tekshirish
+            if not resp.ok:
+                error_text = resp.text[:500] if resp.text else "Unknown error"
+                raise Exception(f"API error ({resp.status_code}): {error_text}")
+            
+            # JSON parsing xatolarini handle qilish
+            try:
+                data = resp.json()
+            except ValueError as json_err:
+                error_text = resp.text[:500] if resp.text else "Empty response"
+                raise Exception(f"JSON parsing error: {json_err}. Response: {error_text}")
+            
+            if not data.get("ok"):
+                error_msg = data.get("error", "Unknown error")
+                raise Exception(error_msg)
             
             draft_id = data.get("draft_id")
             title = data.get("title")
             description = data.get("description")
             body_preview = data.get("body_markdown", "")[:300]
+            
+            if not draft_id or not title:
+                raise Exception("API response missing required fields")
             
             msg = (
                 f"🤖 *AI yangi draft yaratdi:*\n\n"
@@ -331,11 +346,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
+        except requests.exceptions.RequestException as exc:
+            error_msg = str(exc)
+            if len(error_msg) > 1000:
+                error_msg = error_msg[:1000] + "..."
+            await update.message.reply_text(f"❌ Tarmoq xatosi: {error_msg}")
+            if ADMIN_CHAT_ID:
+                await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"❌ AI draft network error: {exc}")
         except Exception as exc:
             error_msg = str(exc)
             if len(error_msg) > 1000:
                 error_msg = error_msg[:1000] + "..."
             await update.message.reply_text(f"❌ AI draft xato: {error_msg}")
+            if ADMIN_CHAT_ID:
+                await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"❌ AI draft error: {exc}")
         return
 
     # AI Settings mode
@@ -903,14 +927,28 @@ async def generate_ai_draft(context: ContextTypes.DEFAULT_TYPE):
             timeout=180,
         )
         
-        data = resp.json()
-        if not resp.ok or not data.get("ok"):
+        # Response status code tekshirish
+        if not resp.ok:
+            error_text = resp.text[:500] if resp.text else "Unknown error"
+            raise Exception(f"API error ({resp.status_code}): {error_text}")
+        
+        # JSON parsing xatolarini handle qilish
+        try:
+            data = resp.json()
+        except ValueError as json_err:
+            error_text = resp.text[:500] if resp.text else "Empty response"
+            raise Exception(f"JSON parsing error: {json_err}. Response: {error_text}")
+        
+        if not data.get("ok"):
             raise Exception(data.get("error") or resp.text)
         
         draft_id = data.get("draft_id")
         title = data.get("title")
         description = data.get("description")
         body_preview = data.get("body_markdown", "")[:300]
+        
+        if not draft_id or not title:
+            raise Exception("API response missing required fields")
         
         # Admin'ga yuborish
         msg = (
@@ -939,6 +977,12 @@ async def generate_ai_draft(context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(buttons),
         )
         
+    except requests.exceptions.RequestException as exc:
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"❌ AI draft network error: {exc}"
+            )
     except Exception as exc:
         if ADMIN_CHAT_ID:
             await context.bot.send_message(
@@ -959,8 +1003,18 @@ async def handle_ai_draft_decision(update: Update, context: ContextTypes.DEFAULT
                 params={"draft_id": draft_id},
                 timeout=30,
             )
-            data = resp.json()
-            if not resp.ok or not data.get("ok"):
+            
+            if not resp.ok:
+                error_text = resp.text[:500] if resp.text else "Unknown error"
+                raise Exception(f"API error ({resp.status_code}): {error_text}")
+            
+            try:
+                data = resp.json()
+            except ValueError as json_err:
+                error_text = resp.text[:500] if resp.text else "Empty response"
+                raise Exception(f"JSON parsing error: {json_err}. Response: {error_text}")
+            
+            if not data.get("ok"):
                 raise Exception(data.get("error") or resp.text)
             
             # Meta olish (categories, tags)
@@ -977,7 +1031,10 @@ async def handle_ai_draft_decision(update: Update, context: ContextTypes.DEFAULT
             context.user_data["ai_draft_step"] = "category"
             
         except Exception as exc:
-            await update.effective_chat.send_message(f"❌ Xato: {exc}")
+            error_msg = str(exc)
+            if len(error_msg) > 1000:
+                error_msg = error_msg[:1000] + "..."
+            await update.effective_chat.send_message(f"❌ Xato: {error_msg}")
     
     elif action == "reject":
         try:
@@ -987,13 +1044,26 @@ async def handle_ai_draft_decision(update: Update, context: ContextTypes.DEFAULT
                 data={"draft_id": draft_id},
                 timeout=30,
             )
-            data = resp.json()
+            
+            if not resp.ok:
+                error_text = resp.text[:500] if resp.text else "Unknown error"
+                raise Exception(f"API error ({resp.status_code}): {error_text}")
+            
+            try:
+                data = resp.json()
+            except ValueError as json_err:
+                error_text = resp.text[:500] if resp.text else "Empty response"
+                raise Exception(f"JSON parsing error: {json_err}. Response: {error_text}")
+            
             if data.get("ok"):
                 await update.effective_chat.send_message("❌ Draft rad etildi.")
             else:
-                await update.effective_chat.send_message(f"❌ Xato: {data.get('error')}")
+                await update.effective_chat.send_message(f"❌ Xato: {data.get('error', 'Unknown error')}")
         except Exception as exc:
-            await update.effective_chat.send_message(f"❌ Xato: {exc}")
+            error_msg = str(exc)
+            if len(error_msg) > 1000:
+                error_msg = error_msg[:1000] + "..."
+            await update.effective_chat.send_message(f"❌ Xato: {error_msg}")
     
     elif action == "regenerate":
         await update.effective_chat.send_message("🔄 Qayta generatsiya qilinmoqda...")
@@ -1004,8 +1074,18 @@ async def handle_ai_draft_decision(update: Update, context: ContextTypes.DEFAULT
                 data={"draft_id": draft_id},
                 timeout=180,
             )
-            data = resp.json()
-            if not resp.ok or not data.get("ok"):
+            
+            if not resp.ok:
+                error_text = resp.text[:500] if resp.text else "Unknown error"
+                raise Exception(f"API error ({resp.status_code}): {error_text}")
+            
+            try:
+                data = resp.json()
+            except ValueError as json_err:
+                error_text = resp.text[:500] if resp.text else "Empty response"
+                raise Exception(f"JSON parsing error: {json_err}. Response: {error_text}")
+            
+            if not data.get("ok"):
                 raise Exception(data.get("error") or resp.text)
             
             # Yangi draftni admin'ga yuborish
@@ -1174,8 +1254,17 @@ async def finalize_ai_draft_post(update: Update, context: ContextTypes.DEFAULT_T
             timeout=60,
         )
         
-        data = resp.json()
-        if not resp.ok or not data.get("ok"):
+        if not resp.ok:
+            error_text = resp.text[:500] if resp.text else "Unknown error"
+            raise Exception(f"API error ({resp.status_code}): {error_text}")
+        
+        try:
+            data = resp.json()
+        except ValueError as json_err:
+            error_text = resp.text[:500] if resp.text else "Empty response"
+            raise Exception(f"JSON parsing error: {json_err}. Response: {error_text}")
+        
+        if not data.get("ok"):
             raise Exception(data.get("error") or resp.text)
         
         post_url = data.get("url")
