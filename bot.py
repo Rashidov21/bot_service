@@ -31,6 +31,11 @@ CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
 DAILY_TIME = os.getenv("DAILY_TIME", "09:00")
 DAILY_TZ = os.getenv("DAILY_TZ", "Asia/Tashkent")
+AI_POST_TIMES = os.getenv("AI_POST_TIMES", "09:00,15:00").split(",")
+AI_POST_INSTRUCTIONS = os.getenv(
+    "AI_POST_INSTRUCTIONS",
+    "Python, dasturlash, veb dasturlash, Django, JavaScript haqida yozing. O'zbek tilida, qiziqarli va foydali maqolalar."
+)
 
 STEPS = ["title", "body", "desc", "image", "category", "tags"]
 
@@ -64,6 +69,26 @@ def fetch_daily_pick() -> Dict[str, Any]:
     )
     resp.raise_for_status()
     return resp.json()
+
+
+# AI Topics ro'yxati
+AI_TOPICS = [
+    "Python'da decoratorlar",
+    "Django ORM optimizatsiyasi",
+    "JavaScript async/await",
+    "React hooks",
+    "SQL query optimizatsiyasi",
+    "Python list comprehension",
+    "Django middleware",
+    "JavaScript closures",
+    "Python generators",
+    "Django REST framework",
+    "JavaScript promises",
+    "Python context managers",
+    "Django signals",
+    "JavaScript ES6 features",
+    "Python virtual environments",
+]
 
 
 def mark_daily_pick(pick_id: int, action: str) -> Dict[str, Any]:
@@ -166,6 +191,50 @@ async def skip_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
 
+    # AI mavzu kiritish rejimi
+    if context.user_data.get("ai_mode") == "await_topic":
+        context.user_data["ai_mode"] = None
+        await update.message.reply_text("⏳ AI draft generatsiya qilmoqda...")
+        try:
+            resp = requests.post(
+                f"{API_BASE}/api/bot/ai/post-idea/",
+                headers=api_headers(),
+                data={"topic": text},
+                timeout=120,
+            )
+            data = resp.json()
+            if not resp.ok or not data.get("ok"):
+                raise Exception(data.get("error") or resp.text)
+            idea = data["data"]
+            
+            # Uzun javoblarni bo'laklarga bo'lish
+            header_msg = (
+                f"🧠 AI g'oya:\n\n"
+                f"📌 *Sarlavha:* {idea['title']}\n\n"
+                f"📝 *Description:*\n{idea['description']}\n\n"
+            )
+            await update.message.reply_text(header_msg, parse_mode="Markdown")
+            
+            # Body alohida xabarda (agar uzun bo'lsa, bo'laklarga bo'lish)
+            body = idea['body_markdown']
+            footer_text = "\n\nAgar yoqsa, /new bosib, AI bergan sarlavha/description/body'ni copy-paste qilib yuklashingiz mumkin."
+            
+            if len(body) > 3500:
+                # Body juda uzun bo'lsa, bo'laklarga bo'lish
+                chunks = [body[i:i+3500] for i in range(0, len(body), 3500)]
+                for idx, chunk in enumerate(chunks):
+                    prefix = f"📄 *Draft (qism {idx+1}/{len(chunks)}):*\n\n" if len(chunks) > 1 else "📄 *Draft:*\n\n"
+                    suffix = footer_text if idx == len(chunks) - 1 else ""
+                    await update.message.reply_text(f"{prefix}{chunk}{suffix}", parse_mode="Markdown")
+            else:
+                await update.message.reply_text(f"📄 *Draft:*\n\n{body}{footer_text}", parse_mode="Markdown")
+                
+        except Exception as exc:
+            if ADMIN_CHAT_ID:
+                await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"❌ AI xato: {exc}")
+            await update.message.reply_text("❌ AI draft yaratishda xatolik yuz berdi. Keyinroq urinib ko'ring.")
+        return
+
     if text == "🆕 Yangi maqola":
         await start(update, context)
         return
@@ -179,6 +248,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await back(update, context)
         return
     if text == "⏭️ Skip rasm":
+        # AI Draft uchun skip
+        if context.user_data.get("ai_draft_step") == "image":
+            context.user_data["ai_draft_photo_file_id"] = None
+            await finalize_ai_draft_post(update, context)
+            return
+        # Oddiy post uchun skip
         await skip_image(update, context)
         return
     if text == "❌ Bekor":
@@ -220,6 +295,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.photo:
         return
+    
+    # AI Draft image
+    if context.user_data.get("ai_draft_step") == "image":
+        context.user_data["ai_draft_photo_file_id"] = update.message.photo[-1].file_id
+        await finalize_ai_draft_post(update, context)
+        return
+    
+    # Oddiy post image
     step = context.user_data.get("step")
     if step != "image":
         await update.message.reply_text("Rasm bosqichida emassiz. 'Holat' ni bosing.")
@@ -257,29 +340,62 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_daily_decision(update, context, action, int(pick_id))
         return
 
-    if data.startswith("cat:"):
-        context.user_data["category_slug"] = data.split(":", 1)[1]
-        context.user_data["step"] = "tags"
-        try:
-            meta = fetch_meta()
-        except Exception as exc:
-            await query.edit_message_text(f"❌ Teglar yuklanmadi: {exc}")
-            return
-        context.user_data["all_tags"] = meta["tags"]
-        context.user_data["selected_tags"] = []
-        await query.edit_message_text(
-            "Teglarni tanlang:",
-            reply_markup=build_tag_keyboard(meta["tags"], []),
-        )
+    # AI Draft callbacks
+    if data.startswith("aidraft:"):
+        action, draft_id = data.split(":", 2)[1:]
+        await handle_ai_draft_decision(update, context, action, int(draft_id))
         return
 
+    # Category tanlash - AI Draft yoki oddiy post uchun
+    if data.startswith("cat:"):
+        if context.user_data.get("ai_draft_step") == "category":
+            # AI Draft uchun
+            category_slug = data.split(":", 1)[1]
+            context.user_data["ai_draft_category_slug"] = category_slug
+            context.user_data["ai_draft_step"] = "tags"
+            try:
+                meta = fetch_meta()
+            except Exception as exc:
+                await query.edit_message_text(f"❌ Teglar yuklanmadi: {exc}")
+                return
+            context.user_data["all_tags"] = meta["tags"]
+            context.user_data["selected_tags"] = []
+            await query.edit_message_text(
+                "Teglarni tanlang:",
+                reply_markup=build_tag_keyboard(meta["tags"], []),
+            )
+        else:
+            # Oddiy post uchun
+            context.user_data["category_slug"] = data.split(":", 1)[1]
+            context.user_data["step"] = "tags"
+            try:
+                meta = fetch_meta()
+            except Exception as exc:
+                await query.edit_message_text(f"❌ Teglar yuklanmadi: {exc}")
+                return
+            context.user_data["all_tags"] = meta["tags"]
+            context.user_data["selected_tags"] = []
+            await query.edit_message_text(
+                "Teglarni tanlang:",
+                reply_markup=build_tag_keyboard(meta["tags"], []),
+            )
+        return
+
+    # Tag tanlash - AI Draft yoki oddiy post uchun
     if data.startswith("tag:"):
         value = data.split(":", 1)[1]
         selected = context.user_data.get("selected_tags", [])
         all_tags = context.user_data.get("all_tags", [])
+        
         if value == "done":
-            await query.edit_message_text("⏳ Post yuborilmoqda...")
-            await create_post(update, context)
+            if context.user_data.get("ai_draft_step") == "tags":
+                # AI Draft uchun - rasm so'rash
+                context.user_data["ai_draft_step"] = "image"
+                await query.edit_message_text("Endi rasm yuboring (yoki 'Skip rasm' tugmasini bosing):")
+            else:
+                # Oddiy post uchun
+                await query.edit_message_text("⏳ Post yuborilmoqda...")
+                await create_post(update, context)
             return
 
         if value in selected:
@@ -498,6 +614,236 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
+async def ai_post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("AI yordamida maqola yozish uchun mavzuni yuboring:")
+    context.user_data["ai_mode"] = "await_topic"
+
+
+async def generate_ai_draft(context: ContextTypes.DEFAULT_TYPE):
+    """AI'dan draft generatsiya qilish (rejalashtirilgan)"""
+    if not ADMIN_CHAT_ID:
+        return
+    
+    import random
+    topic = random.choice(AI_TOPICS)
+    
+    try:
+        resp = requests.post(
+            f"{API_BASE}/api/bot/ai/draft/create/",
+            headers=api_headers(),
+            data={
+                "topic": topic,
+                "instructions": AI_POST_INSTRUCTIONS,
+            },
+            timeout=180,
+        )
+        
+        data = resp.json()
+        if not resp.ok or not data.get("ok"):
+            raise Exception(data.get("error") or resp.text)
+        
+        draft_id = data.get("draft_id")
+        title = data.get("title")
+        description = data.get("description")
+        body_preview = data.get("body_markdown", "")[:300]
+        
+        # Admin'ga yuborish
+        msg = (
+            f"🤖 AI yangi draft yaratdi:\n\n"
+            f"📌 *Mavzu:* {topic}\n\n"
+            f"📝 *Sarlavha:* {title}\n\n"
+            f"📄 *Description:*\n{description}\n\n"
+            f"📖 *Body (preview):*\n{body_preview}...\n\n"
+            f"Draft ID: {draft_id}"
+        )
+        
+        buttons = [
+            [
+                InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"aidraft:approve:{draft_id}"),
+                InlineKeyboardButton("❌ Rad etish", callback_data=f"aidraft:reject:{draft_id}"),
+            ],
+            [
+                InlineKeyboardButton("🔄 Qayta generatsiya", callback_data=f"aidraft:regenerate:{draft_id}"),
+            ],
+        ]
+        
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=msg,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        
+    except Exception as exc:
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"❌ AI draft generatsiya xato: {exc}"
+            )
+
+
+async def handle_ai_draft_decision(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str, draft_id: int):
+    """AI Draft tasdiqlash/rad etish/qayta generatsiya"""
+    
+    if action == "approve":
+        # Draftni olish va kategoriya tanlash uchun yuborish
+        try:
+            resp = requests.get(
+                f"{API_BASE}/api/bot/ai/draft/get/",
+                headers=api_headers(),
+                params={"draft_id": draft_id},
+                timeout=30,
+            )
+            data = resp.json()
+            if not resp.ok or not data.get("ok"):
+                raise Exception(data.get("error") or resp.text)
+            
+            # Meta olish (categories, tags)
+            meta = fetch_meta()
+            
+            # Kategoriya tanlash uchun yuborish
+            await update.effective_chat.send_message(
+                "✅ Draft tasdiqlandi. Endi kategoriya tanlang:",
+                reply_markup=build_category_keyboard(meta["categories"]),
+            )
+            
+            # Context'ga saqlash
+            context.user_data["ai_draft_id"] = draft_id
+            context.user_data["ai_draft_step"] = "category"
+            
+        except Exception as exc:
+            await update.effective_chat.send_message(f"❌ Xato: {exc}")
+    
+    elif action == "reject":
+        try:
+            resp = requests.post(
+                f"{API_BASE}/api/bot/ai/draft/reject/",
+                headers=api_headers(),
+                data={"draft_id": draft_id},
+                timeout=30,
+            )
+            data = resp.json()
+            if data.get("ok"):
+                await update.effective_chat.send_message("❌ Draft rad etildi.")
+            else:
+                await update.effective_chat.send_message(f"❌ Xato: {data.get('error')}")
+        except Exception as exc:
+            await update.effective_chat.send_message(f"❌ Xato: {exc}")
+    
+    elif action == "regenerate":
+        await update.effective_chat.send_message("🔄 Qayta generatsiya qilinmoqda...")
+        try:
+            resp = requests.post(
+                f"{API_BASE}/api/bot/ai/draft/regenerate/",
+                headers=api_headers(),
+                data={"draft_id": draft_id},
+                timeout=180,
+            )
+            data = resp.json()
+            if not resp.ok or not data.get("ok"):
+                raise Exception(data.get("error") or resp.text)
+            
+            # Yangi draftni admin'ga yuborish
+            title = data.get("title")
+            description = data.get("description")
+            body_preview = data.get("body_markdown", "")[:300]
+            
+            msg = (
+                f"🔄 Yangi draft:\n\n"
+                f"📝 *Sarlavha:* {title}\n\n"
+                f"📄 *Description:*\n{description}\n\n"
+                f"📖 *Body (preview):*\n{body_preview}...\n\n"
+                f"Draft ID: {draft_id}"
+            )
+            
+            buttons = [
+                [
+                    InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"aidraft:approve:{draft_id}"),
+                    InlineKeyboardButton("❌ Rad etish", callback_data=f"aidraft:reject:{draft_id}"),
+                ],
+                [
+                    InlineKeyboardButton("🔄 Qayta generatsiya", callback_data=f"aidraft:regenerate:{draft_id}"),
+                ],
+            ]
+            
+            await update.effective_chat.send_message(
+                msg,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except Exception as exc:
+            await update.effective_chat.send_message(f"❌ Xato: {exc}")
+
+
+async def finalize_ai_draft_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """AI Draftni post qilib yaratish"""
+    draft_id = context.user_data.get("ai_draft_id")
+    category_slug = context.user_data.get("ai_draft_category_slug")
+    selected_tags = context.user_data.get("selected_tags", [])
+    photo_file_id = context.user_data.get("ai_draft_photo_file_id", "")
+    
+    if not draft_id or not category_slug:
+        await update.message.reply_text("❌ Ma'lumotlar to'liq emas.")
+        return
+    
+    # Category ID olish
+    meta = fetch_meta()
+    category = next((c for c in meta["categories"] if c["slug"] == category_slug), None)
+    if not category:
+        await update.message.reply_text("❌ Kategoriya topilmadi.")
+        return
+    
+    # Tag IDs
+    tag_ids = ",".join(selected_tags) if selected_tags else ""
+    
+    # Post yaratish
+    await update.message.reply_text("⏳ Post yaratilmoqda...")
+    
+    try:
+        resp = requests.post(
+            f"{API_BASE}/api/bot/ai/draft/approve/",
+            headers=api_headers(),
+            data={
+                "draft_id": draft_id,
+                "category_id": category["id"],
+                "tag_ids": tag_ids,
+                "image_file_id": photo_file_id or "",
+            },
+            timeout=60,
+        )
+        
+        data = resp.json()
+        if not resp.ok or not data.get("ok"):
+            raise Exception(data.get("error") or resp.text)
+        
+        post_url = data.get("url")
+        post_title = data.get("title")
+        
+        # Kanalga yuborish
+        if CHANNEL_ID:
+            caption = f"🆕 {post_title}\n\n{post_url}"
+            if photo_file_id:
+                await context.bot.send_photo(chat_id=CHANNEL_ID, photo=photo_file_id, caption=caption)
+            else:
+                await context.bot.send_message(chat_id=CHANNEL_ID, text=caption)
+        
+        # Context tozalash
+        context.user_data.pop("ai_draft_id", None)
+        context.user_data.pop("ai_draft_step", None)
+        context.user_data.pop("ai_draft_category_slug", None)
+        context.user_data.pop("selected_tags", None)
+        context.user_data.pop("ai_draft_photo_file_id", None)
+        context.user_data.pop("all_tags", None)
+        
+        await update.message.reply_text(
+            f"✅ Post saytga joylandi va kanalga yuborildi!\n\n{post_url}",
+            reply_markup=main_reply_keyboard(),
+        )
+        
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Xato: {exc}")
+
+
 def main():
     if not TG_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required.")
@@ -508,6 +854,7 @@ def main():
 
     app = ApplicationBuilder().token(TG_TOKEN).build()
     app.add_handler(CommandHandler("new", start))
+    app.add_handler(CommandHandler("ai_post", ai_post_command))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("back", back))
@@ -523,6 +870,17 @@ def main():
         app.job_queue.run_daily(send_daily_pick_to_admin, time=daily_time, timezone=tz)
     except Exception:
         pass
+    
+    # Kunda 2 marta AI draft generatsiya
+    for time_str in AI_POST_TIMES:
+        try:
+            hour, minute = time_str.strip().split(":")
+            daily_time = datetime.time(int(hour), int(minute))
+            tz = ZoneInfo(DAILY_TZ)
+            app.job_queue.run_daily(generate_ai_draft, time=daily_time, timezone=tz)
+        except Exception:
+            pass
+    
     app.run_polling()
 
 
