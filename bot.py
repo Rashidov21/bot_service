@@ -1,4 +1,5 @@
 import os
+import json
 import datetime
 from zoneinfo import ZoneInfo
 from typing import Dict, Any, List
@@ -41,6 +42,8 @@ STEPS = ["title", "body", "desc", "image", "category", "tags"]
 
 
 def api_headers() -> Dict[str, str]:
+    if not BOT_API_TOKEN:
+        raise RuntimeError("BOT_API_TOKEN is not set in environment variables!")
     return {"Authorization": f"Bearer {BOT_API_TOKEN}"}
 
 
@@ -89,6 +92,42 @@ AI_TOPICS = [
     "JavaScript ES6 features",
     "Python virtual environments",
 ]
+
+# AI Settings file
+AI_SETTINGS_FILE = "ai_settings.json"
+
+
+def load_ai_settings():
+    """AI sozlamalarini yuklash"""
+    default_settings = {
+        "instructions": AI_POST_INSTRUCTIONS,
+        "trends": [],
+        "topics": AI_TOPICS.copy(),
+    }
+    try:
+        if os.path.exists(AI_SETTINGS_FILE):
+            with open(AI_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # Default qiymatlar bilan birlashtirish
+                default_settings.update(data)
+        return default_settings
+    except Exception:
+        return default_settings
+
+
+def save_ai_settings(settings):
+    """AI sozlamalarini saqlash"""
+    try:
+        with open(AI_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def get_ai_settings():
+    """Hozirgi sozlamalarni olish"""
+    return load_ai_settings()
 
 
 def mark_daily_pick(pick_id: int, action: str) -> Dict[str, Any]:
@@ -235,6 +274,118 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ AI draft yaratishda xatolik yuz berdi. Keyinroq urinib ko'ring.")
         return
 
+    # Manual AI Draft mavzu kiritish rejimi
+    if context.user_data.get("ai_draft_mode") == "await_topic":
+        context.user_data["ai_draft_mode"] = None
+        context.user_data["ai_draft_manual"] = None
+        await update.message.reply_text("⏳ AI draft generatsiya qilmoqda... Bu biroz vaqt olishi mumkin.")
+        
+        try:
+            settings = get_ai_settings()
+            instructions = settings.get('instructions', AI_POST_INSTRUCTIONS)
+            trends = settings.get('trends', [])
+            if trends:
+                trends_text = "\n\nHozirgi trendlar:\n" + "\n".join(f"- {t}" for t in trends)
+                instructions = instructions + trends_text
+            
+            resp = requests.post(
+                f"{API_BASE}/api/bot/ai/draft/create/",
+                headers=api_headers(),
+                data={
+                    "topic": text,
+                    "instructions": instructions,
+                },
+                timeout=180,
+            )
+            
+            data = resp.json()
+            if not resp.ok or not data.get("ok"):
+                raise Exception(data.get("error") or resp.text)
+            
+            draft_id = data.get("draft_id")
+            title = data.get("title")
+            description = data.get("description")
+            body_preview = data.get("body_markdown", "")[:300]
+            
+            msg = (
+                f"🤖 *AI yangi draft yaratdi:*\n\n"
+                f"📌 *Mavzu:* {text}\n\n"
+                f"📝 *Sarlavha:* {title}\n\n"
+                f"📄 *Description:*\n{description}\n\n"
+                f"📖 *Body (preview):*\n{body_preview}...\n\n"
+                f"`Draft ID: {draft_id}`"
+            )
+            
+            buttons = [
+                [
+                    InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"aidraft:approve:{draft_id}"),
+                    InlineKeyboardButton("❌ Rad etish", callback_data=f"aidraft:reject:{draft_id}"),
+                ],
+                [
+                    InlineKeyboardButton("🔄 Qayta generatsiya", callback_data=f"aidraft:regenerate:{draft_id}"),
+                ],
+            ]
+            
+            await update.message.reply_text(
+                msg,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except Exception as exc:
+            error_msg = str(exc)
+            if len(error_msg) > 1000:
+                error_msg = error_msg[:1000] + "..."
+            await update.message.reply_text(f"❌ AI draft xato: {error_msg}")
+        return
+
+    # AI Settings mode
+    if context.user_data.get("ai_settings_mode") == "edit_instructions":
+        context.user_data["ai_settings_mode"] = None
+        settings = get_ai_settings()
+        settings['instructions'] = text
+        if save_ai_settings(settings):
+            await update.message.reply_text("✅ Sozlama yangilandi!")
+        else:
+            await update.message.reply_text("❌ Xatolik: Sozlama saqlanmadi.")
+        return
+    
+    if context.user_data.get("ai_settings_mode") == "add_trend":
+        context.user_data["ai_settings_mode"] = None
+        settings = get_ai_settings()
+        if 'trends' not in settings:
+            settings['trends'] = []
+        settings['trends'].append(text)
+        if save_ai_settings(settings):
+            await update.message.reply_text(f"✅ Trend qo'shildi: {text}")
+        else:
+            await update.message.reply_text("❌ Xatolik: Trend saqlanmadi.")
+        return
+    
+    if context.user_data.get("ai_settings_mode") == "add_topic":
+        context.user_data["ai_settings_mode"] = None
+        settings = get_ai_settings()
+        if 'topics' not in settings:
+            settings['topics'] = []
+        settings['topics'].append(text)
+        if save_ai_settings(settings):
+            await update.message.reply_text(f"✅ Mavzu qo'shildi: {text}")
+        else:
+            await update.message.reply_text("❌ Xatolik: Mavzu saqlanmadi.")
+        return
+    
+    # AI Trend mode (ai_trends_command dan)
+    if context.user_data.get("ai_trend_mode") == "add":
+        context.user_data["ai_trend_mode"] = None
+        settings = get_ai_settings()
+        if 'trends' not in settings:
+            settings['trends'] = []
+        settings['trends'].append(text)
+        if save_ai_settings(settings):
+            await update.message.reply_text(f"✅ Trend qo'shildi: {text}")
+        else:
+            await update.message.reply_text("❌ Xatolik: Trend saqlanmadi.")
+        return
+
     if text == "🆕 Yangi maqola":
         await start(update, context)
         return
@@ -344,6 +495,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("aidraft:"):
         action, draft_id = data.split(":", 2)[1:]
         await handle_ai_draft_decision(update, context, action, int(draft_id))
+        return
+
+    # AI Settings callbacks
+    if data.startswith("aisettings:"):
+        action = data.split(":", 1)[1]
+        await handle_ai_settings_callback(update, context, action)
+        return
+    
+    # AI Trends callbacks
+    if data.startswith("aitrend:"):
+        action = data.split(":", 1)[1]
+        await handle_ai_trends_callback(update, context, action)
         return
 
     # Category tanlash - AI Draft yoki oddiy post uchun
@@ -619,13 +782,115 @@ async def ai_post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["ai_mode"] = "await_topic"
 
 
+async def ai_draft_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual AI draft yaratish"""
+    if not ADMIN_CHAT_ID or str(update.effective_chat.id) != str(ADMIN_CHAT_ID):
+        await update.message.reply_text("❌ Bu funksiya faqat admin uchun.")
+        return
+    
+    await update.message.reply_text(
+        "🤖 AI draft yaratish uchun mavzuni yuboring:\n\n"
+        "Masalan: 'Python decoratorlar haqida', 'Django ORM optimizatsiyasi', va hokazo."
+    )
+    context.user_data["ai_draft_manual"] = True
+    context.user_data["ai_draft_mode"] = "await_topic"
+
+
+async def ai_settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """AI sozlamalarini ko'rish va o'zgartirish"""
+    if not ADMIN_CHAT_ID or str(update.effective_chat.id) != str(ADMIN_CHAT_ID):
+        await update.message.reply_text("❌ Bu funksiya faqat admin uchun.")
+        return
+    
+    settings = get_ai_settings()
+    
+    msg = (
+        f"🤖 *AI Sozlamalar:*\n\n"
+        f"📝 *Hozirgi sozlama:*\n{settings['instructions']}\n\n"
+        f"📊 *Trendlar ({len(settings.get('trends', []))}):*\n"
+    )
+    
+    trends = settings.get('trends', [])
+    if trends:
+        for i, trend in enumerate(trends[:5], 1):  # Faqat birinchi 5 tasini ko'rsatish
+            msg += f"{i}. {trend}\n"
+        if len(trends) > 5:
+            msg += f"... va yana {len(trends) - 5} ta\n"
+    else:
+        msg += "Trendlar yo'q\n"
+    
+    msg += f"\n📌 *Mavzular ({len(settings.get('topics', []))}):*\n"
+    topics = settings.get('topics', [])
+    if topics:
+        for i, topic in enumerate(topics[:5], 1):
+            msg += f"{i}. {topic}\n"
+        if len(topics) > 5:
+            msg += f"... va yana {len(topics) - 5} ta\n"
+    
+    buttons = [
+        [InlineKeyboardButton("✏️ Sozlama o'zgartirish", callback_data="aisettings:edit_instructions")],
+        [InlineKeyboardButton("📊 Trend qo'shish", callback_data="aisettings:add_trend")],
+        [InlineKeyboardButton("📊 Trendlar ro'yxati", callback_data="aisettings:list_trends")],
+        [InlineKeyboardButton("📌 Mavzu qo'shish", callback_data="aisettings:add_topic")],
+        [InlineKeyboardButton("📌 Mavzular ro'yxati", callback_data="aisettings:list_topics")],
+    ]
+    
+    await update.message.reply_text(
+        msg,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def ai_trends_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Trendlarni boshqarish"""
+    if not ADMIN_CHAT_ID or str(update.effective_chat.id) != str(ADMIN_CHAT_ID):
+        await update.message.reply_text("❌ Bu funksiya faqat admin uchun.")
+        return
+    
+    settings = get_ai_settings()
+    trends = settings.get('trends', [])
+    
+    if not trends:
+        await update.message.reply_text(
+            "📊 Hozircha trendlar yo'q.\n\n"
+            "Trend qo'shish uchun matn yuboring:"
+        )
+        context.user_data["ai_trend_mode"] = "add"
+        return
+    
+    msg = f"📊 *Trendlar ({len(trends)}):*\n\n"
+    for i, trend in enumerate(trends, 1):
+        msg += f"{i}. {trend}\n"
+    
+    buttons = [
+        [InlineKeyboardButton("➕ Yangi trend", callback_data="aitrend:add")],
+        [InlineKeyboardButton("🗑️ Trend o'chirish", callback_data="aitrend:delete")],
+    ]
+    
+    await update.message.reply_text(
+        msg,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
 async def generate_ai_draft(context: ContextTypes.DEFAULT_TYPE):
     """AI'dan draft generatsiya qilish (rejalashtirilgan)"""
     if not ADMIN_CHAT_ID:
         return
     
     import random
-    topic = random.choice(AI_TOPICS)
+    settings = get_ai_settings()
+    topics = settings.get('topics', AI_TOPICS)
+    topic = random.choice(topics)
+    
+    # Trendlarni instructions ga qo'shish
+    instructions = settings.get('instructions', AI_POST_INSTRUCTIONS)
+    trends = settings.get('trends', [])
+    if trends:
+        trends_text = "\n\nHozirgi trendlar:\n" + "\n".join(f"- {t}" for t in trends)
+        instructions = instructions + trends_text
     
     try:
         resp = requests.post(
@@ -633,7 +898,7 @@ async def generate_ai_draft(context: ContextTypes.DEFAULT_TYPE):
             headers=api_headers(),
             data={
                 "topic": topic,
-                "instructions": AI_POST_INSTRUCTIONS,
+                "instructions": instructions,
             },
             timeout=180,
         )
@@ -775,6 +1040,103 @@ async def handle_ai_draft_decision(update: Update, context: ContextTypes.DEFAULT
             await update.effective_chat.send_message(f"❌ Xato: {exc}")
 
 
+async def handle_ai_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str):
+    """AI Settings callback handler"""
+    
+    if action == "edit_instructions":
+        await update.callback_query.answer()
+        await update.effective_chat.send_message(
+            "✏️ Yangi sozlama matnini yuboring:\n\n"
+            "Masalan: 'Python, dasturlash, veb dasturlash haqida yozing. O'zbek tilida, qiziqarli va foydali maqolalar.'"
+        )
+        context.user_data["ai_settings_mode"] = "edit_instructions"
+    
+    elif action == "add_trend":
+        await update.callback_query.answer()
+        await update.effective_chat.send_message("📊 Yangi trend matnini yuboring:")
+        context.user_data["ai_settings_mode"] = "add_trend"
+    
+    elif action == "list_trends":
+        await update.callback_query.answer()
+        settings = get_ai_settings()
+        trends = settings.get('trends', [])
+        if not trends:
+            await update.effective_chat.send_message("📊 Trendlar yo'q.")
+        else:
+            msg = f"📊 *Trendlar ({len(trends)}):*\n\n"
+            for i, trend in enumerate(trends, 1):
+                msg += f"{i}. {trend}\n"
+            await update.effective_chat.send_message(msg, parse_mode="Markdown")
+    
+    elif action == "add_topic":
+        await update.callback_query.answer()
+        await update.effective_chat.send_message("📌 Yangi mavzu nomini yuboring:")
+        context.user_data["ai_settings_mode"] = "add_topic"
+    
+    elif action == "list_topics":
+        await update.callback_query.answer()
+        settings = get_ai_settings()
+        topics = settings.get('topics', [])
+        if not topics:
+            await update.effective_chat.send_message("📌 Mavzular yo'q.")
+        else:
+            msg = f"📌 *Mavzular ({len(topics)}):*\n\n"
+            for i, topic in enumerate(topics, 1):
+                msg += f"{i}. {topic}\n"
+            await update.effective_chat.send_message(msg, parse_mode="Markdown")
+
+
+async def handle_ai_trends_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str):
+    """AI Trends callback handler"""
+    
+    if action == "add":
+        await update.callback_query.answer()
+        await update.effective_chat.send_message("📊 Yangi trend matnini yuboring:")
+        context.user_data["ai_trend_mode"] = "add"
+    
+    elif action == "delete":
+        await update.callback_query.answer()
+        settings = get_ai_settings()
+        trends = settings.get('trends', [])
+        if not trends:
+            await update.effective_chat.send_message("📊 O'chirish uchun trendlar yo'q.")
+            return
+        
+        # Inline keyboard bilan trend tanlash
+        buttons = []
+        for i, trend in enumerate(trends):
+            buttons.append([
+                InlineKeyboardButton(
+                    f"🗑️ {trend[:30]}...",
+                    callback_data=f"aitrend:del:{i}"
+                )
+            ])
+        buttons.append([InlineKeyboardButton("❌ Bekor qilish", callback_data="aitrend:cancel")])
+        
+        await update.effective_chat.send_message(
+            "🗑️ O'chirish uchun trendni tanlang:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+    
+    elif action.startswith("del:"):
+        await update.callback_query.answer()
+        idx = int(action.split(":")[1])
+        settings = get_ai_settings()
+        trends = settings.get('trends', [])
+        if 0 <= idx < len(trends):
+            deleted = trends.pop(idx)
+            settings['trends'] = trends
+            if save_ai_settings(settings):
+                await update.effective_chat.send_message(f"✅ Trend o'chirildi: {deleted}")
+            else:
+                await update.effective_chat.send_message("❌ Xatolik: Sozlamalar saqlanmadi.")
+        else:
+            await update.effective_chat.send_message("❌ Noto'g'ri indeks.")
+    
+    elif action == "cancel":
+        await update.callback_query.answer("Bekor qilindi")
+
+
 async def finalize_ai_draft_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """AI Draftni post qilib yaratish"""
     draft_id = context.user_data.get("ai_draft_id")
@@ -855,6 +1217,9 @@ def main():
     app = ApplicationBuilder().token(TG_TOKEN).build()
     app.add_handler(CommandHandler("new", start))
     app.add_handler(CommandHandler("ai_post", ai_post_command))
+    app.add_handler(CommandHandler("ai_draft", ai_draft_command))
+    app.add_handler(CommandHandler("ai_settings", ai_settings_command))
+    app.add_handler(CommandHandler("ai_trends", ai_trends_command))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("back", back))
