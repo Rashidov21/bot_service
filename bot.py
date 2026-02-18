@@ -2,7 +2,7 @@ import os
 import json
 import datetime
 from zoneinfo import ZoneInfo
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import requests
 from dotenv import load_dotenv
@@ -38,7 +38,7 @@ AI_POST_INSTRUCTIONS = os.getenv(
     "Python, dasturlash, veb dasturlash, Django, JavaScript haqida yozing. O'zbek tilida, qiziqarli va foydali maqolalar."
 )
 
-STEPS = ["title", "body", "desc", "image", "category", "tags"]
+STEPS = ["title", "body", "desc", "image", "category", "tags", "schedule"]
 
 
 def api_headers() -> Dict[str, str]:
@@ -160,6 +160,23 @@ def build_tag_keyboard(tags: List[Dict[str, Any]], selected: List[str]):
     return InlineKeyboardMarkup(buttons)
 
 
+def build_schedule_keyboard():
+    """Chiqish sana/vaqtini tanlash uchun inline tugmalar."""
+    buttons = [
+        [InlineKeyboardButton("✅ Hozir", callback_data="schedule:now")],
+        [
+            InlineKeyboardButton("📅 Bugun 18:00", callback_data="schedule:today:18:00"),
+            InlineKeyboardButton("📅 Ertaga 09:00", callback_data="schedule:tomorrow:09:00"),
+        ],
+        [
+            InlineKeyboardButton("📅 Ertaga 18:00", callback_data="schedule:tomorrow:18:00"),
+            InlineKeyboardButton("📅 3 kun 09:00", callback_data="schedule:days:3:09:00"),
+        ],
+        [InlineKeyboardButton("📝 Boshqa sana", callback_data="schedule:custom")],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
 def main_reply_keyboard():
     return ReplyKeyboardMarkup(
         [
@@ -175,10 +192,11 @@ def step_name(step: str) -> str:
     names = {
         "title": "1/6 Sarlavha",
         "body": "2/6 Matn",
-        "desc": "3/6 Description",
-        "image": "4/6 Rasm",
-        "category": "5/6 Kategoriya",
-        "tags": "6/6 Teglar",
+        "desc": "3/7 Description",
+        "image": "4/7 Rasm",
+        "category": "5/7 Kategoriya",
+        "tags": "6/7 Teglar",
+        "schedule": "7/7 Chiqish sana va vaqti",
     }
     return names.get(step, step)
 
@@ -444,6 +462,35 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     step = context.user_data.get("step", "title")
 
+    if step == "schedule":
+        text_clean = text.strip()
+        if not text_clean or text_clean.lower() == "hozir":
+            context.user_data["scheduled_at"] = None
+            await update.message.reply_text("⏳ Post yuborilmoqda...")
+            await create_post(update, context)
+            return
+        # DD.MM.YYYY HH:MM yoki DD.MM.YYYY
+        scheduled_at = None
+        for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y"):
+            try:
+                naive = datetime.datetime.strptime(text_clean, fmt)
+                if fmt == "%d.%m.%Y":
+                    naive = naive.replace(hour=9, minute=0, second=0, microsecond=0)
+                scheduled_at = naive.replace(tzinfo=ZoneInfo(DAILY_TZ))
+                if scheduled_at <= datetime.datetime.now(ZoneInfo(DAILY_TZ)):
+                    await update.message.reply_text("❌ Sana va vaqt kelajakda bo'lishi kerak. Qayta kiriting yoki «Hozir» yozing.")
+                    return
+                break
+            except ValueError:
+                continue
+        if scheduled_at is None:
+            await update.message.reply_text("❌ Noto'g'ri format. Masalan: 15.02.2026 14:30 yoki Hozir")
+            return
+        context.user_data["scheduled_at"] = scheduled_at
+        await update.message.reply_text("⏳ Post rejalashtirilmoqda...")
+        await create_post(update, context)
+        return
+
     if step == "title":
         context.user_data["title"] = text
         context.user_data["step"] = "body"
@@ -495,6 +542,72 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _parse_schedule_datetime(day_offset: int, time_str: str) -> Optional[datetime.datetime]:
+    """day_offset: 0=bugun, 1=ertaga, 3=3 kun keyin. time_str: '09:00' yoki '18:00'."""
+    tz = ZoneInfo(DAILY_TZ)
+    now = datetime.datetime.now(tz)
+    target_date = (now.date() + datetime.timedelta(days=day_offset))
+    try:
+        h, m = time_str.split(":")
+        target = datetime.datetime(
+            target_date.year, target_date.month, target_date.day,
+            int(h), int(m), 0, 0, tzinfo=tz,
+        )
+        return target
+    except (ValueError, TypeError):
+        return None
+
+
+async def handle_schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
+    query = update.callback_query
+    parts = data.split(":")
+    if len(parts) < 2:
+        return
+    action = parts[1]
+
+    if action == "now":
+        context.user_data["scheduled_at"] = None
+        await query.edit_message_text("⏳ Post yuborilmoqda...")
+        await create_post(update, context)
+        return
+
+    if action == "custom":
+        await query.edit_message_text(
+            "📝 Sana va vaqtni yozing:\n\n"
+            "Masalan: <b>15.02.2026 14:30</b> yoki <b>20.02.2026</b> (vaqt 09:00 bo'ladi).",
+            parse_mode="HTML",
+        )
+        return
+
+    scheduled_at = None
+    if action == "today" and len(parts) >= 3:
+        scheduled_at = _parse_schedule_datetime(0, parts[2])
+    elif action == "tomorrow" and len(parts) >= 3:
+        scheduled_at = _parse_schedule_datetime(1, parts[2])
+    elif action == "days" and len(parts) >= 4:
+        try:
+            days = int(parts[2])
+            scheduled_at = _parse_schedule_datetime(days, parts[3])
+        except ValueError:
+            pass
+
+    if scheduled_at is None:
+        await query.edit_message_text("❌ Noto'g'ri tanlov. Qayta tanlang yoki «Boshqa sana».", reply_markup=build_schedule_keyboard())
+        return
+
+    tz = ZoneInfo(DAILY_TZ)
+    if scheduled_at <= datetime.datetime.now(tz):
+        await query.edit_message_text(
+            "❌ Bu vaqt o'tgan. Boshqa variant tanlang yoki «Boshqa sana» orqali kelajakdagi sana kiriting.",
+            reply_markup=build_schedule_keyboard(),
+        )
+        return
+
+    context.user_data["scheduled_at"] = scheduled_at
+    await query.edit_message_text("⏳ Post rejalashtirilmoqda...")
+    await create_post(update, context)
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -513,6 +626,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("daily:"):
         action, pick_id = data.split(":", 2)[1:]
         await handle_daily_decision(update, context, action, int(pick_id))
+        return
+
+    # Chiqish sana/vaqtini tanlash (schedule)
+    if data.startswith("schedule:"):
+        await handle_schedule_callback(update, context, data)
         return
 
     # AI Draft callbacks
@@ -580,9 +698,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["ai_draft_step"] = "image"
                 await query.edit_message_text("Endi rasm yuboring (yoki 'Skip rasm' tugmasini bosing):")
             else:
-                # Oddiy post uchun
-                await query.edit_message_text("⏳ Post yuborilmoqda...")
-                await create_post(update, context)
+                # Oddiy post uchun — chiqish sana/vaqtini inline tugmalar bilan so'ra
+                context.user_data["step"] = "schedule"
+                await query.edit_message_text(
+                    "📅 Chiqish sana va vaqtini tanlang:",
+                    reply_markup=build_schedule_keyboard(),
+                )
             return
 
         if value in selected:
@@ -615,6 +736,9 @@ async def create_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "category_slug": data.get("category_slug", ""),
         "tag_slugs": ",".join(data.get("selected_tags", [])),
     }
+    scheduled_at = data.get("scheduled_at")
+    if scheduled_at is not None:
+        payload["published_date"] = scheduled_at.isoformat()
     try:
         resp = requests.post(
             f"{API_BASE}/api/bot/post/",
@@ -644,6 +768,24 @@ async def create_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     post_url = result.get("url", "")
     title = data.get("title", "")
+    is_scheduled = result.get("scheduled", False)
+    scheduled_date_iso = result.get("published_date", "")
+
+    if is_scheduled:
+        context.user_data.clear()
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(scheduled_date_iso.replace("Z", "+00:00"))
+            fmt = dt.strftime("%d.%m.%Y %H:%M")
+        except Exception:
+            fmt = scheduled_date_iso
+        await update.effective_chat.send_message(
+            f"✅ Maqola rejalashtirildi.\n\n📅 Saytga va kanalga chiqadi: <b>{fmt}</b>\n\n{post_url}",
+            parse_mode="HTML",
+            reply_markup=main_reply_keyboard(),
+        )
+        return
+
     description = (data.get("description", "") or "").strip()
     body_text = (data.get("body", "") or "").strip()
     preview_source = description if description else body_text
