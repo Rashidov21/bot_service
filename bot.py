@@ -14,6 +14,7 @@ from telegram import (
     ReplyKeyboardMarkup,
     KeyboardButton,
 )
+from telegram.error import BadRequest
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -923,6 +924,14 @@ async def handle_daily_decision(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     err = context.error
+    # "Message is not modified" — xabar va tugmalar o'zgarmaganda Telegram BadRequest qaytaradi; e'tiborsiz qoldiramiz
+    if isinstance(err, BadRequest) and "message is not modified" in str(err).lower():
+        if update and getattr(update, "callback_query", None):
+            try:
+                await update.callback_query.answer()
+            except Exception:
+                pass
+        return
     msg = f"❌ Bot xatosi: {type(err).__name__}: {err}"
     if len(msg) > 1000:
         msg = msg[:1000] + "..."
