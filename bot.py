@@ -14,7 +14,7 @@ from telegram import (
     ReplyKeyboardMarkup,
     KeyboardButton,
 )
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -924,7 +924,8 @@ async def handle_daily_decision(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     err = context.error
-    # "Message is not modified" — xabar va tugmalar o'zgarmaganda Telegram BadRequest qaytaradi; e'tiborsiz qoldiramiz
+
+    # 1) "Message is not modified" — xabar va tugmalar o'zgarmaganda Telegram BadRequest qaytaradi; e'tiborsiz qoldiramiz
     if isinstance(err, BadRequest) and "message is not modified" in str(err).lower():
         if update and getattr(update, "callback_query", None):
             try:
@@ -932,6 +933,21 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         return
+
+    # 2) Tarmoq xatolari (httpx.ReadError va o'xshashlar) — kritik emas, admin va kanalga yubormaymiz
+    if isinstance(err, NetworkError) and "readerror" in str(err).lower():
+        try:
+            print(f"[BOT NetworkError] {err}")
+        except Exception:
+            pass
+        if update and getattr(update, "callback_query", None):
+            try:
+                await update.callback_query.answer()
+            except Exception:
+                pass
+        return
+
+    # 3) Qolgan barcha xatolar avvalgidek
     msg = f"❌ Bot xatosi: {type(err).__name__}: {err}"
     if len(msg) > 1000:
         msg = msg[:1000] + "..."
